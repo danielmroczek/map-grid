@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="svg2" width="48" height="64" style="background:0 0;border:0" version="1.1">
+  <style id="style1">
+    text {
+      fill: #fff;
+      font-family: sans-serif;
+      font-weight: 700;
+      text-anchor: middle;
+      alignment-baseline: middle;
+      dominant-baseline: middle
+    }
+  </style>
+  <path id="path1" fill="#c73030" d="M24 64 6 40h36z" style="stroke-width:1.29778" />
+  <circle id="circle1" cx="24" cy="24" r="22.737" fill="#e74c3c" stroke="#c73030" stroke-width="2"
+    style="stroke:#c73030;stroke-width:2.52632;stroke-dasharray:none;stroke-opacity:1" />
+  <text id="lat" x="24" y="19">52</text>
+  <text id="lng" x="24" y="32">20</text>
+</svg>
