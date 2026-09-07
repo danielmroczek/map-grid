@@ -12,7 +12,8 @@ const CONFIG = {
 
 // State
 let map;
-let markers = [];
+let markerMap = new Map(); // key: "lat,lng" -> marker
+let currentPrecision = -1;
 let pinSvg;
 
 /**
@@ -120,7 +121,7 @@ async function fetchAddress(lat, lng) {
  */
 async function handleMarkerClick(marker, baseContent, lat, lng) {
   // Close other popups
-  markers.forEach((m) => {
+  markerMap.forEach((m) => {
     if (m !== marker) {
       m.closePopup();
     }
@@ -166,19 +167,24 @@ function createMarker(lat, lng, precision) {
 
   marker.on("click", () => handleMarkerClick(marker, popupContent, lat, lng));
 
-  markers.push(marker);
+  const key = `${lat},${lng}`;
+  markerMap.set(key, marker);
 }
 
 /**
  * Updates the marker grid based on current map view
+ * Reuses existing markers when precision hasn't changed, only adding/removing as needed
  */
 function updateMarkers() {
-  // Clear existing markers
-  markers.forEach((marker) => map.removeLayer(marker));
-  markers = [];
-
   const bounds = map.getBounds();
   const { precision, step } = calculateGridPrecision(bounds, map.getZoom());
+
+  // If precision changed, all markers need recreation (coordinates change format)
+  if (precision !== currentPrecision) {
+    markerMap.forEach((marker) => map.removeLayer(marker));
+    markerMap.clear();
+    currentPrecision = precision;
+  }
 
   const south = bounds.getSouth();
   const north = bounds.getNorth();
@@ -191,7 +197,8 @@ function updateMarkers() {
   const endLat = Math.floor(north / step) * step;
   const endLng = Math.floor(east / step) * step;
 
-  // Generate grid markers
+  // Build set of desired coordinate keys
+  const desiredCoords = new Set();
   for (
     let lat = startLat;
     lat <= endLat;
@@ -202,11 +209,32 @@ function updateMarkers() {
       lng <= endLng;
       lng = +(lng + step).toFixed(precision)
     ) {
-      createMarker(lat, lng, precision);
+      desiredCoords.add(`${lat},${lng}`);
     }
   }
 
-  console.log(`Created ${markers.length} markers`);
+  // Remove markers that are no longer in view
+  for (const [key, marker] of markerMap) {
+    if (!desiredCoords.has(key)) {
+      map.removeLayer(marker);
+      markerMap.delete(key);
+    }
+  }
+
+  // Add markers that are missing
+  let addedCount = 0;
+  for (const key of desiredCoords) {
+    if (!markerMap.has(key)) {
+      const [lat, lng] = key.split(",").map(Number);
+      createMarker(lat, lng, precision);
+      addedCount++;
+    }
+  }
+
+  const reusedCount = markerMap.size - addedCount;
+  console.log(
+    `Total: ${markerMap.size} markers (${addedCount} added, ${reusedCount} reused)`
+  );
 }
 
 /**
