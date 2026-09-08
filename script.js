@@ -1,3 +1,10 @@
+import { Map, Popup, setWorkerUrl } from "https://unpkg.com/maplibre-gl@^6.8.0/dist/maplibre-gl.mjs";
+
+// MapLibre GL JS v6 ships as an ES module and loads its WebWorker as a separate
+// module. With no bundler, point it at the official CDN copy so tiles parse on a
+// worker thread instead of blocking the main thread.
+setWorkerUrl("https://unpkg.com/maplibre-gl@^6.8.0/dist/maplibre-gl-worker.mjs");
+
 // Constants
 const CONFIG = {
   DEFAULT_BBOX: [49.0022, 54.835, 14.122, 24.15],
@@ -5,16 +12,18 @@ const CONFIG = {
   MAX_PRECISION: 8,
   MAX_ATTEMPTS: 10,
   MARKER_SCALE: 0.8,
-  TILE_URL: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  TILE_ATTRIBUTION:
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  // OpenFreeMap Liberty — free, keyless vector-tile basemap style (includes
+  // vector tiles, glyphs and sprites). Rendering is fully WebGL-accelerated.
+  STYLE_URL: "https://tiles.openfreemap.org/styles/liberty",
+  SOURCE_ID: "grid-points",
+  PIN_ICON_LAYER: "pin-icon",
+  PIN_TEXT_LAYER: "pin-text",
 };
 
 // State
 let map;
-let markerMap = new Map(); // key: "lat,lng" -> marker
 let currentPrecision = -1;
-let pinSvg;
+let activePopup = null;
 
 /**
  * Fetches the user's country bounding box based on IP geolocation
@@ -40,7 +49,7 @@ async function fetchUserCountryBbox() {
 
 /**
  * Calculates optimal grid precision based on current zoom level and visible area
- * @param {L.LatLngBounds} bounds - Current map bounds
+ * @param {import('maplibre-gl').LngLatBounds} bounds - Current map bounds
  * @param {number} zoom - Current zoom level
  * @returns {{precision: number, step: number}}
  */
@@ -72,30 +81,109 @@ function calculateGridPrecision(bounds, zoom) {
 }
 
 /**
- * Creates an SVG icon for a marker with embedded coordinates
- * @param {number} lat - Latitude
- * @param {number} lng - Longitude
- * @param {number} precision - Decimal precision
- * @returns {L.DivIcon}
+ * Generates GeoJSON features for all grid points within the visible bounds
+ * @param {import('maplibre-gl').LngLatBounds} bounds - Current map bounds
+ * @param {number} precision - Decimal precision for coordinates
+ * @param {number} step - Grid step size
+ * @returns {Array<GeoJSON.Feature>} Array of Point features
  */
-function createMarkerIcon(lat, lng, precision) {
-  const svgElement = new DOMParser().parseFromString(
-    pinSvg,
-    "image/svg+xml"
-  ).documentElement;
+function generateGridFeatures(bounds, precision, step) {
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
 
-  const latText = svgElement.querySelector("#lat");
-  const lngText = svgElement.querySelector("#lng");
+  const startLat = Math.ceil(south / step) * step;
+  const startLng = Math.ceil(west / step) * step;
+  const endLat = Math.floor(north / step) * step;
+  const endLng = Math.floor(east / step) * step;
 
-  if (latText) latText.textContent = lat.toFixed(Math.max(0, precision));
-  if (lngText) lngText.textContent = lng.toFixed(Math.max(0, precision));
+  const features = [];
 
-  return L.divIcon({
-    html: `<div style="transform: scale(${CONFIG.MARKER_SCALE});">${svgElement.outerHTML}</div>`,
-    className: "coordinate-marker",
-    iconAnchor: [24 * CONFIG.MARKER_SCALE, 64 * CONFIG.MARKER_SCALE],
-    popupAnchor: [0, 0],
+  for (
+    let lat = startLat;
+    lat <= endLat;
+    lat = +(lat + step).toFixed(precision)
+  ) {
+    for (
+      let lng = startLng;
+      lng <= endLng;
+      lng = +(lng + step).toFixed(precision)
+    ) {
+      features.push({
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [lng, lat], // GeoJSON convention: [lng, lat]
+        },
+        properties: {
+          lat: lat.toFixed(Math.max(0, precision)),
+          lng: lng.toFixed(Math.max(0, precision)),
+        },
+      });
+    }
+  }
+
+  return features;
+}
+
+/**
+ * Updates the grid marker data source with features for the current viewport.
+ * All rendering is handled by WebGL through MapLibre's style layers.
+ */
+function updateMarkers() {
+  if (!map || !map.getSource(CONFIG.SOURCE_ID)) return;
+
+  const bounds = map.getBounds();
+  const zoom = map.getZoom();
+  const { precision } = calculateGridPrecision(bounds, zoom);
+
+  currentPrecision = precision;
+  const features = generateGridFeatures(bounds, precision, calculateGridPrecision(bounds, zoom).step);
+
+  map.getSource(CONFIG.SOURCE_ID).setData({
+    type: "FeatureCollection",
+    features,
   });
+
+  console.log(`Grid updated: ${features.length} markers, precision: ${precision}`);
+}
+
+/**
+ * Creates a HiDPI canvas with the pin icon drawn on it
+ * @returns {HTMLCanvasElement} Canvas with pin graphic (2x resolution for Retina)
+ */
+function createPinCanvas() {
+  const w = 48;
+  const h = 64;
+  const scale = 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = w * scale;
+  canvas.height = h * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+
+  // Pin triangle (pointing down)
+  ctx.fillStyle = "#c73030";
+  ctx.beginPath();
+  ctx.moveTo(6, 40);
+  ctx.lineTo(42, 40);
+  ctx.lineTo(24, 64);
+  ctx.closePath();
+  ctx.fill();
+
+  // Pin circle fill
+  ctx.fillStyle = "#e74c3c";
+  ctx.beginPath();
+  ctx.arc(24, 24, 22.737, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pin circle stroke
+  ctx.strokeStyle = "#c73030";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  return canvas;
 }
 
 /**
@@ -113,158 +201,176 @@ async function fetchAddress(lat, lng) {
 }
 
 /**
- * Handles marker click event to load and display address
- * @param {L.Marker} marker - The clicked marker
- * @param {string} baseContent - Base popup content (coordinates)
- * @param {number} lat - Latitude
- * @param {number} lng - Longitude
+ * Sets up map interaction handlers: hover cursor and click popups
  */
-async function handleMarkerClick(marker, baseContent, lat, lng) {
-  // Close other popups
-  markerMap.forEach((m) => {
-    if (m !== marker) {
-      m.closePopup();
-    }
+function setupInteraction() {
+  // Hover cursor
+  map.on("mouseenter", CONFIG.PIN_ICON_LAYER, () => {
+    map.getCanvas().style.cursor = "pointer";
+  });
+  map.on("mouseleave", CONFIG.PIN_ICON_LAYER, () => {
+    map.getCanvas().style.cursor = "";
   });
 
-  const popup = marker.getPopup();
+  // Click popup
+  map.on("click", CONFIG.PIN_ICON_LAYER, (e) => {
+    if (e.features.length === 0) return;
 
-  // Prevent duplicate address fetches
-  if (popup.getContent().includes("<br><br>")) return;
+    // Remove existing popup
+    if (activePopup) {
+      activePopup.remove();
+      activePopup = null;
+    }
 
-  popup.setContent(baseContent + "<br><br>Loading address...");
+    const { lat, lng } = e.features[0].properties;
+    const coords = e.features[0].geometry.coordinates.slice();
+    const p = currentPrecision;
 
-  try {
-    const address = await fetchAddress(lat, lng);
-    popup.setContent(baseContent + `<br><br>${address}`);
-  } catch (error) {
-    console.error("Failed to fetch address:", error);
-    popup.setContent(baseContent + "<br><br>Failed to load address");
-  }
-}
+    const popupHTML = `
+      Lat (Y): <strong>${parseFloat(lat).toFixed(Math.max(0, p))}</strong><br>
+      Lng (X): <strong>${parseFloat(lng).toFixed(Math.max(0, p))}</strong>
+      <br><br>Loading address...`;
 
-/**
- * Creates a marker at the specified coordinates
- * @param {number} lat - Latitude
- * @param {number} lng - Longitude
- * @param {number} precision - Decimal precision
- */
-function createMarker(lat, lng, precision) {
-  const icon = createMarkerIcon(lat, lng, precision);
-  const marker = L.marker([lat, lng], {
-    icon,
-    riseOnHover: true,
-  }).addTo(map);
+    activePopup = new Popup({
+      closeButton: true,
+      className: "coordinate-popup",
+      anchor: "bottom",
+      offset: 30,
+    })
+      .setLngLat(coords)
+      .setHTML(popupHTML)
+      .addTo(map);
 
-  const popupContent = `
-    Lat (Y): <strong>${lat.toFixed(Math.max(0, precision))}</strong><br>
-    Lng (X): <strong>${lng.toFixed(Math.max(0, precision))}</strong>`;
-
-  marker.bindPopup(popupContent, {
-    closeButton: true,
-    className: "coordinate-popup",
+    fetchAddress(parseFloat(lat), parseFloat(lng))
+      .then((address) => {
+        if (activePopup) {
+          activePopup.setHTML(`
+            Lat (Y): <strong>${parseFloat(lat).toFixed(Math.max(0, p))}</strong><br>
+            Lng (X): <strong>${parseFloat(lng).toFixed(Math.max(0, p))}</strong>
+            <br><br>${address}`);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to fetch address:", error);
+        if (activePopup) {
+          activePopup.setHTML(`
+            Lat (Y): <strong>${parseFloat(lat).toFixed(Math.max(0, p))}</strong><br>
+            Lng (X): <strong>${parseFloat(lng).toFixed(Math.max(0, p))}</strong>
+            <br><br>Failed to load address`);
+        }
+      });
   });
 
-  marker.on("click", () => handleMarkerClick(marker, popupContent, lat, lng));
-
-  const key = `${lat},${lng}`;
-  markerMap.set(key, marker);
+  // Close popup when clicking on empty map area
+  map.on("click", (e) => {
+    const features = map.queryRenderedFeatures(e.point, {
+      layers: [CONFIG.PIN_ICON_LAYER],
+    });
+    if (features.length === 0 && activePopup) {
+      activePopup.remove();
+      activePopup = null;
+    }
+  });
 }
 
 /**
- * Updates the marker grid based on current map view
- * Reuses existing markers when precision hasn't changed, only adding/removing as needed
- */
-function updateMarkers() {
-  const bounds = map.getBounds();
-  const { precision, step } = calculateGridPrecision(bounds, map.getZoom());
-
-  // If precision changed, all markers need recreation (coordinates change format)
-  if (precision !== currentPrecision) {
-    markerMap.forEach((marker) => map.removeLayer(marker));
-    markerMap.clear();
-    currentPrecision = precision;
-  }
-
-  const south = bounds.getSouth();
-  const north = bounds.getNorth();
-  const west = bounds.getWest();
-  const east = bounds.getEast();
-
-  // Calculate grid boundaries aligned to step
-  const startLat = Math.ceil(south / step) * step;
-  const startLng = Math.ceil(west / step) * step;
-  const endLat = Math.floor(north / step) * step;
-  const endLng = Math.floor(east / step) * step;
-
-  // Build set of desired coordinate keys
-  const desiredCoords = new Set();
-  for (
-    let lat = startLat;
-    lat <= endLat;
-    lat = +(lat + step).toFixed(precision)
-  ) {
-    for (
-      let lng = startLng;
-      lng <= endLng;
-      lng = +(lng + step).toFixed(precision)
-    ) {
-      desiredCoords.add(`${lat},${lng}`);
-    }
-  }
-
-  // Remove markers that are no longer in view
-  for (const [key, marker] of markerMap) {
-    if (!desiredCoords.has(key)) {
-      map.removeLayer(marker);
-      markerMap.delete(key);
-    }
-  }
-
-  // Add markers that are missing
-  let addedCount = 0;
-  for (const key of desiredCoords) {
-    if (!markerMap.has(key)) {
-      const [lat, lng] = key.split(",").map(Number);
-      createMarker(lat, lng, precision);
-      addedCount++;
-    }
-  }
-
-  const reusedCount = markerMap.size - addedCount;
-  console.log(
-    `Total: ${markerMap.size} markers (${addedCount} added, ${reusedCount} reused)`
-  );
-}
-
-/**
- * Initializes the map and loads initial data
+ * Initializes the MapLibre GL map with WebGL-accelerated tile rendering and marker layers
  */
 async function initializeMap() {
-  // Load pin SVG
-  pinSvg = await fetch("./pin.svg").then((response) => response.text());
-
   // Fetch user's country bounding box
   const bbox = await fetchUserCountryBbox();
   const [south, north, west, east] = bbox.map(parseFloat);
+  const centerLng = (west + east) / 2;
+  const centerLat = (south + north) / 2;
 
-  // Initialize map
-  map = L.map("map").fitBounds([
-    [south, west],
-    [north, east],
-  ]);
+  // Create MapLibre GL map using OpenFreeMap Liberty vector-tile style (WebGL)
+  map = new Map({
+    container: "map",
+    style: CONFIG.STYLE_URL,
+    center: [centerLng, centerLat],
+    zoom: 6,
+    maxZoom: 19,
+  });
 
-  // Add tile layer
-  L.tileLayer(CONFIG.TILE_URL, {
-    attribution: CONFIG.TILE_ATTRIBUTION,
-  }).addTo(map);
+  map.on("load", () => {
+    // Add our grid points as a GeoJSON source on top of the vector basemap
+    map.addSource(CONFIG.SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+    // Add pin icon image to the style (HiDPI, rendered once for all markers).
+    // MapLibre v6's addImage() accepts ImageData/ImageBitmap/HTMLImageElement - not a raw
+    // canvas - so extract the pixels into ImageData first.
+    const pinCanvas = createPinCanvas();
+    const imageData = pinCanvas
+      .getContext("2d")
+      .getImageData(0, 0, pinCanvas.width, pinCanvas.height);
+    map.addImage("pin", imageData, { pixelRatio: 2, sdf: false });
 
-  // Setup event listeners
-  map.on("moveend", updateMarkers);
-  map.on("zoomend", updateMarkers);
+    // Add pin icon layer — GPU-rendered symbol layer
+    map.addLayer({
+      id: CONFIG.PIN_ICON_LAYER,
+      type: "symbol",
+      source: CONFIG.SOURCE_ID,
+      layout: {
+        "icon-image": "pin",
+        "icon-size": CONFIG.MARKER_SCALE,
+        "icon-anchor": "bottom",
+        "icon-allow-overlap": true,
+        "icon-optional": false,
+      },
+    });
 
-  // Initial marker draw
-  updateMarkers();
+    // Add pin text layer — GPU-rendered text on top of icons
+    map.addLayer({
+      id: CONFIG.PIN_TEXT_LAYER,
+      type: "symbol",
+      source: CONFIG.SOURCE_ID,
+      layout: {
+        "text-field": [
+          "format",
+          ["get", "lat"],
+          { "font-scale": 0.8 },
+          "\n",
+          {},
+          ["get", "lng"],
+          { "font-scale": 0.8 },
+        ],
+        "text-font": ["Noto Sans Bold"],
+        "text-size": 11,
+        "text-max-width": 8,
+        "text-allow-overlap": true,
+        "text-anchor": "center",
+        "text-offset": [0, -3],
+      },
+      paint: {
+        "text-color": "#ffffff",
+      },
+    });
+
+    // Setup click/hover interactions
+    setupInteraction();
+
+    // Debounced move/zoom handlers to avoid excessive updates during continuous panning
+    let moveTimeout;
+    const onMoveEnd = () => {
+      clearTimeout(moveTimeout);
+      moveTimeout = setTimeout(updateMarkers, 50);
+    };
+    map.on("moveend", onMoveEnd);
+    map.on("zoomend", onMoveEnd);
+
+    // Fit to country bounds and draw initial markers
+    map.fitBounds(
+      [
+        [west, south],
+        [east, north],
+      ],
+      { padding: 20, animate: false }
+    );
+
+    updateMarkers();
+  });
 }
 
 // Start the application

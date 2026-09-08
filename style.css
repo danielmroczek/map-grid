@@ -10,3 +10,27 @@ body {
 .coordinate-popup {
   font-family: monospace;
 }
+
+/* MapLibre popup overrides */
+.maplibregl-popup-content {
+  font-family: monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+
+.maplibregl-popup-close-button {
+  font-size: 18px;
+  padding: 2px 6px;
+}
+
+/* Compact map controls */
+.maplibregl-ctrl-group {
+  border-radius: 6px;
+}
+
+.maplibregl-ctrl-group button {
+  width: 32px;
+  height: 32px;
+}
