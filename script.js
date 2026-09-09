@@ -71,7 +71,10 @@ function calculateGridPrecision(bounds, zoom) {
       break;
     }
 
-    precision = Math.max(0, precision - 1);
+    // Allow precision to go negative so the step grows to 10, 100, ... degrees.
+    // This keeps the marker count in check when zoomed far out: at step 10 the
+    // grid only lands on "tens" (e.g. 50, 60, 180, 270).
+    precision -= 1;
     step = Math.pow(10, -precision);
   }
 
@@ -93,6 +96,9 @@ function generateGridFeatures(bounds, precision, step) {
   const west = bounds.getWest();
   const east = bounds.getEast();
 
+  // Precision may be negative at far zoom-outs (marks a coarse grid like";tens"), but coordinates still display at whole degrees.
+  const displayPrecision = Math.max(0, precision);
+
   const startLat = Math.ceil(south / step) * step;
   const startLng = Math.ceil(west / step) * step;
   const endLat = Math.floor(north / step) * step;
@@ -103,12 +109,12 @@ function generateGridFeatures(bounds, precision, step) {
   for (
     let lat = startLat;
     lat <= endLat;
-    lat = +(lat + step).toFixed(precision)
+    lat = +(lat + step).toFixed(displayPrecision)
   ) {
     for (
       let lng = startLng;
       lng <= endLng;
-      lng = +(lng + step).toFixed(precision)
+      lng = +(lng + step).toFixed(displayPrecision)
     ) {
       features.push({
         type: "Feature",
@@ -117,8 +123,8 @@ function generateGridFeatures(bounds, precision, step) {
           coordinates: [lng, lat], // GeoJSON convention: [lng, lat]
         },
         properties: {
-          lat: lat.toFixed(Math.max(0, precision)),
-          lng: lng.toFixed(Math.max(0, precision)),
+          lat: lat.toFixed(displayPrecision),
+          lng: lng.toFixed(displayPrecision),
         },
       });
     }
@@ -136,10 +142,10 @@ function updateMarkers() {
 
   const bounds = map.getBounds();
   const zoom = map.getZoom();
-  const { precision } = calculateGridPrecision(bounds, zoom);
+  const { precision, step } = calculateGridPrecision(bounds, zoom);
 
   currentPrecision = precision;
-  const features = generateGridFeatures(bounds, precision, calculateGridPrecision(bounds, zoom).step);
+  const features = generateGridFeatures(bounds, precision, step);
 
   map.getSource(CONFIG.SOURCE_ID).setData({
     type: "FeatureCollection",
