@@ -26,17 +26,24 @@ let currentPrecision = -1;
 let activePopup = null;
 
 /**
- * Fetches the user's country bounding box based on IP geolocation
+ * Fetches the user's geo info (country code + preferred language) via IP geolocation.
+ * ipapi returns `languages` like "pl" or "pl,de" — used to pick the map's label language.
+ * @returns {Promise<{country_name: string, country_code: string, languages?: string}>}
+ */
+async function fetchGeoInfo() {
+  const geoResponse = await fetch("https://ipapi.co/json/");
+  return await geoResponse.json();
+}
+
+/**
+ * Fetches the user's country bounding box from Nominatim based on their country code
+ * @param {string} countryCode - ISO country code (e.g. "pl") from ipapi
  * @returns {Promise<number[]>} Bounding box array [south, north, west, east]
  */
-async function fetchUserCountryBbox() {
+async function fetchUserCountryBbox(countryCode) {
   try {
-    const geoResponse = await fetch("https://ipapi.co/json/");
-    const geoData = await geoResponse.json();
-    console.log("Your country based on IP:", geoData.country_name);
-
     const nominatimResponse = await fetch(
-      `https://nominatim.openstreetmap.org/search?country=${geoData.country_code}&format=json`
+      `https://nominatim.openstreetmap.org/search?country=${countryCode}&format=json`
     );
     const data = await nominatimResponse.json();
 
@@ -45,6 +52,50 @@ async function fetchUserCountryBbox() {
     console.error("Failed to fetch country bbox:", error);
     return CONFIG.DEFAULT_BBOX;
   }
+}
+
+/**
+ * Rewrites a basemap style so label text-fields prefer the user's local language.
+ * OpenFreeMap tiles follow the OpenMapTiles schema, which carries per-language
+ * `name:xx` fields (e.g. `name:pl`). The Liberty style builds each text-field
+ * from a `case`/`coalesce` expression that leans on `name_en` first, so we wrap
+ * the whole original expression in a coalesce that puts the localized name first
+ * and keeps the original as the fallback. This preserves the nonlatin/latin/en
+ * handling while making the localized name win whenever it exists.
+ * @param {object} style - A MapLibre style specification object
+ * @param {string} language - ISO language code (e.g. "pl"); skipped if falsy
+ * @returns {object} The style with localized text-fields
+ */
+function localizeStyle(style, language) {
+  if (!language) return style;
+
+  const localizedField = `name:${language}`;
+  const localize = (value) => {
+    if (typeof value === "string") return ["get", value];
+    // Only wrap when the field is actually resolved from a name property.
+    // ["get", "name"] / ["coalesce", ["get","name_en"], ["get","name"]] etc.
+    return ["coalesce", ["get", localizedField], value];
+  };
+
+  const isNameText = (expr) =>
+    Array.isArray(expr) &&
+    (expr[0] === "get" || expr[0] === "coalesce" || expr[0] === "case");
+
+  return {
+    ...style,
+    layers: style.layers.map((layer) => {
+      if (layer.type !== "symbol") return layer;
+      const textField = layer.layout?.["text-field"];
+      if (textField === undefined || !isNameText(textField)) return layer;
+      return {
+        ...layer,
+        layout: {
+          ...layer.layout,
+          "text-field": localize(textField),
+        },
+      };
+    }),
+  };
 }
 
 /**
@@ -283,16 +334,35 @@ function setupInteraction() {
  * Initializes the MapLibre GL map with WebGL-accelerated tile rendering and marker layers
  */
 async function initializeMap() {
-  // Fetch user's country bounding box
-  const bbox = await fetchUserCountryBbox();
+  // Fetch user's country bounding box + language (used for labels) via IP geolocation
+  let countryCode, language;
+  try {
+    const geo = await fetchGeoInfo();
+    countryCode = geo.country_code;
+    language = geo.languages?.split(",")[0]; // e.g. "pl" or "pl,de" -> "pl"
+    console.log(
+      "Your country based on IP:",
+      geo.country_name,
+      "| label language:",
+      language
+    );
+  } catch (error) {
+    console.error("Failed to fetch geo info:", error);
+  }
+
+  const bbox = await fetchUserCountryBbox(countryCode);
   const [south, north, west, east] = bbox.map(parseFloat);
   const centerLng = (west + east) / 2;
   const centerLat = (south + north) / 2;
 
+  // Localize the basemap style so place/street names appear in the user's language
+  const styleUrl = CONFIG.STYLE_URL;
+  const localizedStyle = localizeStyle(await (await fetch(styleUrl)).json(), language);
+
   // Create MapLibre GL map using OpenFreeMap Liberty vector-tile style (WebGL)
   map = new Map({
     container: "map",
-    style: CONFIG.STYLE_URL,
+    style: localizedStyle,
     center: [centerLng, centerLat],
     zoom: 6,
     maxZoom: 19,
