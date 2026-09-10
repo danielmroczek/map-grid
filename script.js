@@ -296,6 +296,7 @@ async function initializeMap() {
     center: [centerLng, centerLat],
     zoom: 6,
     maxZoom: 19,
+    crossSourceCollisions: false,
   });
 
   map.on("load", () => {
@@ -345,7 +346,7 @@ async function initializeMap() {
         "text-font": ["Noto Sans Bold"],
         "text-size": 11,
         "text-max-width": 8,
-        "text-allow-overlap": true,
+        "text-overlap": "cooperative",
         "text-anchor": "center",
         "text-offset": [0, -3],
       },
